@@ -16,12 +16,17 @@ const program = new Command();
 
 program
   .name('lcagents')
+  .alias('lcagent')
   .description('LendingClub Internal Agent System - Distributed BMAD-Core Agents')
   .version('1.0.0-alpha.1');
 
 // Register commands
 program.addCommand(resCommand);
 program.addCommand(agentCommand);
+// Expose common setup commands at top-level for convenience and for integration tests
+program.addCommand(initModule.initCommand);
+program.addCommand(uninstallModule.uninstallCommand);
+program.addCommand(coreCommand);
 // REMOVED: commandCommand - Functionality available via 'lcagents agent command'
 
 // Create setup command group

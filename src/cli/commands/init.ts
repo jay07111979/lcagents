@@ -13,10 +13,30 @@ import { MetadataGenerator } from '../../core/MetadataGenerator';
 import { InstallationOptions, InstallationResult } from '../../types/CoreSystem';
 import { analyzeTechStack, generateTechStackReport, TechStackData, selectPod } from '../../utils/techStacker';
 
+// Local subset of pod configuration shape used when running non-interactive pod selection
+interface PodConfig {
+  name: string;
+  id: string;
+  owner: string;
+}
+
+interface PodsConfiguration {
+  pods: PodConfig[];
+  allowCustomPods: boolean;
+  customPodOption: { name: string; description: string };
+}
+
 /**
  * Ask user for installation directory
  */
-export async function selectInstallationDirectory(): Promise<string> {
+export async function selectInstallationDirectory(interactive: boolean = true): Promise<string> {
+  // When non-interactive, default to current working directory
+  if (!interactive) {
+    const defaultPath = process.cwd();
+    console.log(chalk.gray(`Non-interactive mode: using current directory as install path: ${defaultPath}`));
+    return defaultPath;
+  }
+
   console.log(chalk.blue('\n🎯 LCAgents Installation Setup'));
   console.log(chalk.gray('First, let\'s determine where to install LCAgents.\n'));
 
@@ -122,7 +142,31 @@ export async function validateInstallationDirectory(installPath: string): Promis
 /**
  * Get pod information from user
  */
-export async function getPodInformation(): Promise<{ name: string; id: string; owner: string }> {
+export async function getPodInformation(interactive: boolean = true): Promise<{ name: string; id: string; owner: string }> {
+  // When non-interactive, pick the first configured pod or a sensible default
+  if (!interactive) {
+    try {
+      const podCfgPath = path.join(__dirname, '../../config/pods.json');
+      if (await fs.pathExists(podCfgPath)) {
+        const raw = await fs.readFile(podCfgPath, 'utf-8');
+        const parsed = JSON.parse(raw) as PodsConfiguration;
+        if (parsed.pods && parsed.pods.length > 0) {
+          const p = parsed.pods[0];
+          if (p) {
+            console.log(chalk.gray(`Non-interactive mode: assigning to pod ${p.name}`));
+            return { name: p.name, id: p.id, owner: p.owner };
+          }
+        }
+      }
+    } catch (err) {
+      // ignore and fall back
+    }
+
+    // Fallback default
+    const cwdName = path.basename(process.cwd());
+    return { name: cwdName, id: cwdName.toLowerCase().replace(/[^a-z0-9]/g, '-'), owner: 'team' };
+  }
+
   console.log(chalk.blue('🏢 Pod Assignment'));
   console.log(chalk.gray('Assign this repository to an organizational pod for better management.\n'));
   
@@ -132,7 +176,11 @@ export async function getPodInformation(): Promise<{ name: string; id: string; o
 /**
  * Analyze tech stack and get repository information
  */
-export async function analyzeTechStackWithContext(installPath: string, podInfo: { name: string; id: string; owner: string }): Promise<TechStackData> {
+export async function analyzeTechStackWithContext(
+  installPath: string,
+  podInfo: { name: string; id: string; owner: string },
+  interactive: boolean = true
+): Promise<TechStackData> {
   const spinner = ora('🔍 Analyzing project technology stack...').start();
   
   try {
@@ -142,19 +190,24 @@ export async function analyzeTechStackWithContext(installPath: string, podInfo: 
     if (techStackData.noTechStack) {
       spinner.warn(chalk.yellow('Limited technology stack detected'));
       console.log(chalk.yellow(`\n⚠️  ${techStackData.message}`));
-      
-      const { proceedAnyway } = await inquirer.prompt([
-        {
-          type: 'confirm',
-          name: 'proceedAnyway',
-          message: 'Do you want to proceed with LCAgents installation anyway?',
-          default: false
-        }
-      ]);
 
-      if (!proceedAnyway) {
-        console.log(chalk.gray('\n👋 Installation cancelled. Please ensure your project has recognizable tech stack files.\n'));
-        process.exit(0);
+      if (interactive) {
+        const { proceedAnyway } = await inquirer.prompt([
+          {
+            type: 'confirm',
+            name: 'proceedAnyway',
+            message: 'Do you want to proceed with LCAgents installation anyway?',
+            default: false
+          }
+        ]);
+
+        if (!proceedAnyway) {
+          console.log(chalk.gray('\n👋 Installation cancelled. Please ensure your project has recognizable tech stack files.\n'));
+          process.exit(0);
+        }
+      } else {
+        // Non-interactive: default to proceed to allow automated installs in CI/test environments
+        console.log(chalk.gray('Non-interactive: proceeding despite limited tech stack'));
       }
     } else {
       spinner.succeed(chalk.green('Tech stack analysis completed'));
@@ -177,7 +230,7 @@ export async function analyzeTechStackWithContext(installPath: string, podInfo: 
       console.log(chalk.green('\n✅ Technology stack analysis completed!'));
     }
 
-    return techStackData;
+  return techStackData;
 
   } catch (error) {
     spinner.fail(chalk.red('Failed to analyze tech stack'));
@@ -348,12 +401,22 @@ export async function createUserShim(installPath: string): Promise<{ success: bo
     const isWin = process.platform === 'win32';
     const home = os.homedir();
 
+    // Create a project-local runtime launcher under .lcagents/runtime/bin
+    const runtimeBin = path.join(installPath, '.lcagents', 'runtime', 'bin');
+    await fs.ensureDir(runtimeBin);
+
+    // The runtime launcher will require the built CLI entry if present, otherwise it will emit a helpful message.
+    const projectCli = path.join(installPath, 'dist', 'cli', 'index.js');
+    const runtimeLauncher = path.join(runtimeBin, 'lcagent.js');
+    const launcherContent = `#!/usr/bin/env node\n\n// Runtime launcher for LCAgents local CLI\nconst path = require('path');\nconst fs = require('fs');\nconst target = ${JSON.stringify(projectCli)};\nif (fs.existsSync(target)) {\n  try { require(target); } catch (e) {\n    console.error('Failed to run local LCAgents CLI at', target);\n    console.error(e && e.stack ? e.stack : e);\n    process.exit(1);\n  }\n} else {\n  console.error('LCAgents runtime not found at', target);\n  console.error('Please build the project (npm run build) or ensure the runtime exists at the above path.');\n  process.exit(1);\n}\n`;
+    await fs.writeFile(runtimeLauncher, launcherContent, { mode: 0o755 });
+
     if (isWin) {
       const userBin = path.join(process.env['USERPROFILE'] || home, 'bin');
       await fs.ensureDir(userBin);
       const shimPath = path.join(userBin, 'lcagent.ps1');
-      const projectCli = path.join(installPath, 'dist', 'cli', 'index.js');
-      const body = `param([Parameter(ValueFromRemainingArguments=$true)] $args)\nnode '${projectCli}' $args\n`;
+      // PowerShell wrapper to invoke the project-local launcher
+      const body = `param([Parameter(ValueFromRemainingArguments=$true)] $args)\nnode '${runtimeLauncher}' $args\n`;
       await fs.writeFile(shimPath, body, 'utf8');
 
       return {
@@ -365,8 +428,7 @@ export async function createUserShim(installPath: string): Promise<{ success: bo
       const userBin = path.join(home, '.local', 'bin');
       await fs.ensureDir(userBin);
       const shimPath = path.join(userBin, 'lcagent');
-      const projectCli = path.join(installPath, 'dist', 'cli', 'index.js');
-      const shim = `#!/usr/bin/env bash\nnode "${projectCli}" "$@"\n`;
+      const shim = `#!/usr/bin/env bash\nnode "${runtimeLauncher}" "$@"\n`;
       await fs.writeFile(shimPath, shim, { mode: 0o755 });
 
       return {
@@ -401,18 +463,21 @@ export const initCommand = new Command('init')
     const spinner = ora('Initializing LCAgents...').start();
     
     try {
-      // Step 1: Get directory
-      spinner.stop();
-      const installPath = await selectInstallationDirectory();
+  // Step 1: Get directory
+  spinner.stop();
+  // Determine interactive mode: CLI option wins, otherwise fall back to TTY check
+  const interactiveMode = (typeof options.interactive === 'boolean') ? options.interactive : !!process.stdin.isTTY;
+
+  const installPath = await selectInstallationDirectory(interactiveMode);
       
       // Step 2: Validate directory source (if error, fail the installer)
       await validateInstallationDirectory(installPath);
       
-      // Step 3: Get the pod name  
-      const podInfo = await getPodInformation();
+  // Step 3: Get the pod name  
+  const podInfo = await getPodInformation(interactiveMode);
       
       // Step 4: Analyze tech stack
-      const techStackData = await analyzeTechStackWithContext(installPath, podInfo);
+  const techStackData = await analyzeTechStackWithContext(installPath, podInfo, interactiveMode);
       
       const lcagentsDir = path.join(installPath, '.lcagents');
       

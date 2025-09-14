@@ -4,7 +4,8 @@
   "description": "LendingClub Internal AI Agent System",
   "main": "dist/index.js",
   "bin": {
-    "lcagents": "dist/cli/index.js"
+    "lcagents": "dist/cli/index.js",
+    "lcagent": "dist/cli/index.js"
   },
   "scripts": {
     "build": "node scripts/update-package-url.js && tsc && npm run copy-resources",

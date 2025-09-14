@@ -42,6 +42,7 @@ exports.validateInstallationDirectory = validateInstallationDirectory;
 exports.getPodInformation = getPodInformation;
 exports.analyzeTechStackWithContext = analyzeTechStackWithContext;
 exports.updateGitHubCopilotInstructions = updateGitHubCopilotInstructions;
+exports.createUserShim = createUserShim;
 const commander_1 = require("commander");
 const fs = __importStar(require("fs-extra"));
 const path = __importStar(require("path"));
@@ -58,7 +59,13 @@ const techStacker_1 = require("../../utils/techStacker");
 /**
  * Ask user for installation directory
  */
-async function selectInstallationDirectory() {
+async function selectInstallationDirectory(interactive = true) {
+    // When non-interactive, default to current working directory
+    if (!interactive) {
+        const defaultPath = process.cwd();
+        console.log(chalk_1.default.gray(`Non-interactive mode: using current directory as install path: ${defaultPath}`));
+        return defaultPath;
+    }
     console.log(chalk_1.default.blue('\n🎯 LCAgents Installation Setup'));
     console.log(chalk_1.default.gray('First, let\'s determine where to install LCAgents.\n'));
     const { installChoice } = await inquirer_1.default.prompt([
@@ -155,7 +162,30 @@ async function validateInstallationDirectory(installPath) {
 /**
  * Get pod information from user
  */
-async function getPodInformation() {
+async function getPodInformation(interactive = true) {
+    // When non-interactive, pick the first configured pod or a sensible default
+    if (!interactive) {
+        try {
+            const podCfgPath = path.join(__dirname, '../../config/pods.json');
+            if (await fs.pathExists(podCfgPath)) {
+                const raw = await fs.readFile(podCfgPath, 'utf-8');
+                const parsed = JSON.parse(raw);
+                if (parsed.pods && parsed.pods.length > 0) {
+                    const p = parsed.pods[0];
+                    if (p) {
+                        console.log(chalk_1.default.gray(`Non-interactive mode: assigning to pod ${p.name}`));
+                        return { name: p.name, id: p.id, owner: p.owner };
+                    }
+                }
+            }
+        }
+        catch (err) {
+            // ignore and fall back
+        }
+        // Fallback default
+        const cwdName = path.basename(process.cwd());
+        return { name: cwdName, id: cwdName.toLowerCase().replace(/[^a-z0-9]/g, '-'), owner: 'team' };
+    }
     console.log(chalk_1.default.blue('🏢 Pod Assignment'));
     console.log(chalk_1.default.gray('Assign this repository to an organizational pod for better management.\n'));
     return await (0, techStacker_1.selectPod)();
@@ -163,7 +193,7 @@ async function getPodInformation() {
 /**
  * Analyze tech stack and get repository information
  */
-async function analyzeTechStackWithContext(installPath, podInfo) {
+async function analyzeTechStackWithContext(installPath, podInfo, interactive = true) {
     const spinner = (0, ora_1.default)('🔍 Analyzing project technology stack...').start();
     try {
         // Set pod context before analysis
@@ -171,17 +201,23 @@ async function analyzeTechStackWithContext(installPath, podInfo) {
         if (techStackData.noTechStack) {
             spinner.warn(chalk_1.default.yellow('Limited technology stack detected'));
             console.log(chalk_1.default.yellow(`\n⚠️  ${techStackData.message}`));
-            const { proceedAnyway } = await inquirer_1.default.prompt([
-                {
-                    type: 'confirm',
-                    name: 'proceedAnyway',
-                    message: 'Do you want to proceed with LCAgents installation anyway?',
-                    default: false
+            if (interactive) {
+                const { proceedAnyway } = await inquirer_1.default.prompt([
+                    {
+                        type: 'confirm',
+                        name: 'proceedAnyway',
+                        message: 'Do you want to proceed with LCAgents installation anyway?',
+                        default: false
+                    }
+                ]);
+                if (!proceedAnyway) {
+                    console.log(chalk_1.default.gray('\n👋 Installation cancelled. Please ensure your project has recognizable tech stack files.\n'));
+                    process.exit(0);
                 }
-            ]);
-            if (!proceedAnyway) {
-                console.log(chalk_1.default.gray('\n👋 Installation cancelled. Please ensure your project has recognizable tech stack files.\n'));
-                process.exit(0);
+            }
+            else {
+                // Non-interactive: default to proceed to allow automated installs in CI/test environments
+                console.log(chalk_1.default.gray('Non-interactive: proceeding despite limited tech stack'));
             }
         }
         else {
@@ -244,7 +280,16 @@ async function setupShellAlias() {
         // Determine which shell config file to use
         let configFile = '';
         let shellName = '';
-        if (shell.includes('zsh')) {
+        const isWin = process.platform === 'win32';
+        if (isWin) {
+            // On Windows, we'll target PowerShell profile locations
+            // Prefer modern PowerShell profile location under Documents\PowerShell, fallback to WindowsPowerShell
+            const p1 = path.join(homeDir, 'Documents', 'PowerShell', 'Microsoft.PowerShell_profile.ps1');
+            const p2 = path.join(homeDir, 'Documents', 'WindowsPowerShell', 'Microsoft.PowerShell_profile.ps1');
+            configFile = (await fs.pathExists(p1)) ? p1 : p2;
+            shellName = 'powershell';
+        }
+        else if (shell.includes('zsh')) {
             configFile = path.join(homeDir, '.zshrc');
             shellName = 'zsh';
         }
@@ -261,11 +306,9 @@ async function setupShellAlias() {
             shellName = 'bash';
         }
         else {
-            return {
-                success: false,
-                message: 'Unsupported shell detected',
-                instructions: 'Manually add: alias lcagent="npx git+https://github.com/jmaniLC/lcagents.git"'
-            };
+            // Unknown shell - fall back to POSIX-style rc file in home
+            configFile = path.join(homeDir, '.profile');
+            shellName = 'sh';
         }
         let aliasCommand1 = 'alias lcagent="npx git+https://github.com/jmaniLC/lcagents.git"';
         let aliasCommand2 = 'alias lcagents="npx git+https://github.com/jmaniLC/lcagents.git"';
@@ -278,6 +321,17 @@ async function setupShellAlias() {
         catch (err) {
             // keep defaults
         }
+        // Safely derive git target argument for npx commands
+        let gitTarget;
+        try {
+            const repoCfg2 = require('../../../config/repository.json');
+            gitTarget = process.env['REPOSITORY_GITNPX'] || `git+${repoCfg2.repository.url}`;
+        }
+        catch (err) {
+            gitTarget = process.env['REPOSITORY_GITNPX'];
+        }
+        if (!gitTarget)
+            gitTarget = 'git+https://github.com/jmaniLC/lcagents.git';
         const aliasComment = '# LCAgents aliases for easy access';
         // Check if alias already exists
         if (await fs.pathExists(configFile)) {
@@ -289,40 +343,36 @@ async function setupShellAlias() {
                 };
             }
         }
-        // Add aliases to shell config
-        const aliasEntry = `\n${aliasComment}\n${aliasCommand1}\n${aliasCommand2}\n`;
-        await fs.ensureFile(configFile);
-        await fs.appendFile(configFile, aliasEntry);
-        // Create activation script for immediate alias availability
-        try {
-            const tempScript = path.join(os.tmpdir(), 'lcagents-activate.sh');
-            const activateScript = `#!/bin/bash
-# LCAgents alias activation script
-source ${configFile}
-${aliasCommand1}
-${aliasCommand2}
-echo "✅ LCAgents aliases activated in current session"
-# Clean up this temporary script
-rm -f "${tempScript}"
-`;
-            await fs.writeFile(tempScript, activateScript, { mode: 0o755 });
-            // Show clear activation instructions with immediate execution option
-            console.log(chalk_1.default.green('✅ LCAgents aliases configured in shell!'));
-            console.log(chalk_1.default.yellow('💡 To activate immediately in this terminal:'));
-            console.log(chalk_1.default.cyan(`   source ${tempScript}`));
-            console.log(chalk_1.default.dim('   (or restart your terminal for automatic activation)'));
+        // Add aliases to shell config (different per-shell)
+        if (isWin) {
+            // For PowerShell, create functions instead of POSIX alias
+            const psFunc1 = `function lcagent { param([Parameter(ValueFromRemainingArguments=$true)]$args) npx ${gitTarget} $args }`;
+            const psFunc2 = `function lcagents { param([Parameter(ValueFromRemainingArguments=$true)]$args) npx ${gitTarget} $args }`;
+            const entry = `# LCAgents aliases\n${psFunc1}\n${psFunc2}\n`;
+            await fs.ensureFile(configFile);
+            await fs.appendFile(configFile, entry, 'utf-8');
+            // For PowerShell provide an activation instruction (do not create temp files)
+            console.log(chalk_1.default.green('✅ LCAgents aliases configured in PowerShell profile!'));
+            console.log(chalk_1.default.dim('   (restart your PowerShell session to load the new functions)'));
             console.log();
             return {
                 success: true,
                 message: `Aliases added to ${shellName} configuration`,
-                instructions: `Execute: source ${tempScript} for immediate activation`
+                instructions: `Run in current PowerShell session: . '${configFile}'`
             };
         }
-        catch (error) {
+        else {
+            const aliasEntry = `\n${aliasComment}\n${aliasCommand1}\n${aliasCommand2}\n`;
+            await fs.ensureFile(configFile);
+            await fs.appendFile(configFile, aliasEntry);
+            // For POSIX shells return a direct source command (no temp script)
+            console.log(chalk_1.default.green('✅ LCAgents aliases configured in shell!'));
+            console.log(chalk_1.default.dim('   (restart your terminal to load the new aliases)'));
+            console.log();
             return {
                 success: true,
                 message: `Aliases added to ${shellName} configuration`,
-                instructions: `Run 'source ${path.basename(configFile)}' or restart your terminal to use 'lcagent' and 'lcagents' commands`
+                instructions: `Run in current shell: source ${configFile}`
             };
         }
     }
@@ -331,6 +381,56 @@ rm -f "${tempScript}"
             success: false,
             message: 'Failed to setup shell alias',
             instructions: 'Manually add: alias lcagent="npx git+https://github.com/jmaniLC/lcagents.git"'
+        };
+    }
+}
+/**
+ * Create a per-user shim that invokes the project's local CLI.
+ * Returns an activation instruction string the user can run to make the shim available in the current session.
+ */
+async function createUserShim(installPath) {
+    try {
+        const isWin = process.platform === 'win32';
+        const home = os.homedir();
+        // Create a project-local runtime launcher under .lcagents/runtime/bin
+        const runtimeBin = path.join(installPath, '.lcagents', 'runtime', 'bin');
+        await fs.ensureDir(runtimeBin);
+        // The runtime launcher will require the built CLI entry if present, otherwise it will emit a helpful message.
+        const projectCli = path.join(installPath, 'dist', 'cli', 'index.js');
+        const runtimeLauncher = path.join(runtimeBin, 'lcagent.js');
+        const launcherContent = `#!/usr/bin/env node\n\n// Runtime launcher for LCAgents local CLI\nconst path = require('path');\nconst fs = require('fs');\nconst target = ${JSON.stringify(projectCli)};\nif (fs.existsSync(target)) {\n  try { require(target); } catch (e) {\n    console.error('Failed to run local LCAgents CLI at', target);\n    console.error(e && e.stack ? e.stack : e);\n    process.exit(1);\n  }\n} else {\n  console.error('LCAgents runtime not found at', target);\n  console.error('Please build the project (npm run build) or ensure the runtime exists at the above path.');\n  process.exit(1);\n}\n`;
+        await fs.writeFile(runtimeLauncher, launcherContent, { mode: 0o755 });
+        if (isWin) {
+            const userBin = path.join(process.env['USERPROFILE'] || home, 'bin');
+            await fs.ensureDir(userBin);
+            const shimPath = path.join(userBin, 'lcagent.ps1');
+            // PowerShell wrapper to invoke the project-local launcher
+            const body = `param([Parameter(ValueFromRemainingArguments=$true)] $args)\nnode '${runtimeLauncher}' $args\n`;
+            await fs.writeFile(shimPath, body, 'utf8');
+            return {
+                success: true,
+                message: `User shim created at ${shimPath}`,
+                instructions: `Add ${userBin} to your PATH or run: $env:PATH += ';${userBin}'; . ${shimPath}`
+            };
+        }
+        else {
+            const userBin = path.join(home, '.local', 'bin');
+            await fs.ensureDir(userBin);
+            const shimPath = path.join(userBin, 'lcagent');
+            const shim = `#!/usr/bin/env bash\nnode "${runtimeLauncher}" "$@"\n`;
+            await fs.writeFile(shimPath, shim, { mode: 0o755 });
+            return {
+                success: true,
+                message: `User shim created at ${shimPath}`,
+                instructions: `Ensure ${userBin} is on your PATH (e.g. export PATH=\"${userBin}:$PATH\") or run: source ~/.profile`
+            };
+        }
+    }
+    catch (error) {
+        return {
+            success: false,
+            message: 'Failed to create user shim',
+            instructions: 'You can add an alias pointing to dist/cli/index.js or use npm link'
         };
     }
 }
@@ -351,13 +451,15 @@ exports.initCommand = new commander_1.Command('init')
     try {
         // Step 1: Get directory
         spinner.stop();
-        const installPath = await selectInstallationDirectory();
+        // Determine interactive mode: CLI option wins, otherwise fall back to TTY check
+        const interactiveMode = (typeof options.interactive === 'boolean') ? options.interactive : !!process.stdin.isTTY;
+        const installPath = await selectInstallationDirectory(interactiveMode);
         // Step 2: Validate directory source (if error, fail the installer)
         await validateInstallationDirectory(installPath);
         // Step 3: Get the pod name  
-        const podInfo = await getPodInformation();
+        const podInfo = await getPodInformation(interactiveMode);
         // Step 4: Analyze tech stack
-        const techStackData = await analyzeTechStackWithContext(installPath, podInfo);
+        const techStackData = await analyzeTechStackWithContext(installPath, podInfo, interactiveMode);
         const lcagentsDir = path.join(installPath, '.lcagents');
         // Check if already initialized
         if (await fs.pathExists(lcagentsDir) && !options.force) {
@@ -491,18 +593,42 @@ exports.initCommand = new commander_1.Command('init')
         }
         // Setup shell alias
         const aliasResult = await setupShellAlias();
+        // Try to create a local user shim that points to the installed CLI for better local UX
+        let shimResult = null;
+        try {
+            shimResult = await createUserShim(installPath);
+        }
+        catch (err) {
+            shimResult = null;
+        }
         if (aliasResult.success) {
             console.log(chalk_1.default.green('🔧 Shell Alias Setup:'));
             console.log(chalk_1.default.white(`   ✅ ${aliasResult.message}`));
             if (aliasResult.instructions) {
-                // Check if it's the activation script instruction
-                if (aliasResult.instructions.includes('/tmp/lcagents-activate.sh')) {
-                    console.log(chalk_1.default.yellow('   🚀 Quick Start:'));
-                    console.log(chalk_1.default.cyan(`   ${aliasResult.instructions.split(': ')[1]}`));
+                // Show platform-specific activation instruction clearly
+                if (process.platform === 'win32') {
+                    console.log(chalk_1.default.yellow('   🚀 To activate aliases in the current PowerShell session:'));
+                    console.log(chalk_1.default.cyan(`   ${aliasResult.instructions}`));
+                    console.log(chalk_1.default.dim('   (or restart PowerShell to load the new profile automatically)'));
                 }
                 else {
-                    console.log(chalk_1.default.dim(`   💡 ${aliasResult.instructions}`));
+                    console.log(chalk_1.default.yellow('   🚀 To activate aliases in the current shell:'));
+                    console.log(chalk_1.default.cyan(`   ${aliasResult.instructions}`));
+                    console.log(chalk_1.default.dim('   (or restart your terminal to load the updated shell configuration)'));
                 }
+                // Provide a quick verification command the user can run now
+                console.log(chalk_1.default.yellow('   🔎 Verify the commands are available now:'));
+                console.log(chalk_1.default.cyan(`   ${process.platform === 'win32' ? 'lcagent -h' : 'lcagent -h'}`));
+                console.log(chalk_1.default.dim('   If the command is not found, run the activation command above or restart your terminal/PowerShell.'));
+            }
+            // If shim was created, show its instructions as the preferred way to run the local CLI
+            if (shimResult && shimResult.success) {
+                console.log(chalk_1.default.yellow('   📦 Local shim installed:'));
+                console.log(chalk_1.default.cyan(`   ${shimResult.instructions}`));
+                console.log(chalk_1.default.dim('   After adding the user bin to PATH you can run: lcagent -h'));
+            }
+            else if (shimResult && !shimResult.success) {
+                console.log(chalk_1.default.dim(`   (shim creation skipped: ${shimResult.message})`));
             }
             console.log(chalk_1.default.white('   Available commands:'), chalk_1.default.cyan('lcagent <command>'), chalk_1.default.dim('or'), chalk_1.default.cyan('lcagents <command>'));
             console.log();
