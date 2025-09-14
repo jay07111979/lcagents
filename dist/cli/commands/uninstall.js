@@ -46,79 +46,77 @@ const ora_1 = __importDefault(require("ora"));
 const inquirer_1 = __importDefault(require("inquirer"));
 const GitHubCopilotManager_1 = require("../../core/GitHubCopilotManager");
 /**
- * Remove shell alias for lcagent command
+ * Remove shell alias for lcagent command (cross-platform)
  */
 async function removeShellAlias() {
     try {
         const homeDir = os.homedir();
-        const shell = process.env['SHELL'] || '';
-        // Determine which shell config file to use
-        let configFile = '';
-        let shellName = '';
-        if (shell.includes('zsh')) {
-            configFile = path.join(homeDir, '.zshrc');
-            shellName = 'zsh';
-        }
-        else if (shell.includes('bash')) {
-            // Check for .bash_profile first, then .bashrc
-            const bashProfile = path.join(homeDir, '.bash_profile');
-            const bashrc = path.join(homeDir, '.bashrc');
-            if (await fs.pathExists(bashProfile)) {
-                configFile = bashProfile;
+        // Candidate profile files to check
+        const candidates = [];
+        candidates.push(path.join(homeDir, '.bash_profile'));
+        candidates.push(path.join(homeDir, '.bashrc'));
+        candidates.push(path.join(homeDir, '.zshrc'));
+        candidates.push(path.join(homeDir, '.profile'));
+        candidates.push(path.join(homeDir, 'Documents', 'WindowsPowerShell', 'Microsoft.PowerShell_profile.ps1'));
+        candidates.push(path.join(homeDir, 'Documents', 'PowerShell', 'Microsoft.PowerShell_profile.ps1'));
+        const aliasPatterns = [
+            'alias lcagent=',
+            'alias lcagents=',
+            '# LCAgents alias',
+            'Set-Alias lcagent',
+            'Set-Alias lcagents',
+            'function lcagent',
+            'function lcagents'
+        ];
+        let found = false;
+        let modifiedFile = '';
+        for (const configFile of candidates) {
+            try {
+                if (!await fs.pathExists(configFile))
+                    continue;
+                const content = await fs.readFile(configFile, 'utf-8');
+                if (!aliasPatterns.some(p => content.includes(p)))
+                    continue;
+                const lines = content.split('\n');
+                const filteredLines = lines.filter(line => !aliasPatterns.some(p => line.includes(p)));
+                await fs.writeFile(configFile, filteredLines.join('\n'));
+                found = true;
+                modifiedFile = configFile;
+                break;
             }
-            else {
-                configFile = bashrc;
+            catch (e) {
+                // ignore and continue
             }
-            shellName = 'bash';
         }
-        else {
-            return {
-                success: false,
-                message: 'Unsupported shell detected - manually remove lcagent and lcagents aliases'
-            };
+        if (!found) {
+            return { success: true, message: 'No lcagent/lcagents aliases found in common shell/profile files' };
         }
-        // Check if config file exists and has the alias
-        if (!await fs.pathExists(configFile)) {
-            return {
-                success: true,
-                message: 'No shell configuration file found'
-            };
-        }
-        const content = await fs.readFile(configFile, 'utf-8');
-        if (!content.includes('alias lcagent=') && !content.includes('alias lcagents=')) {
-            return {
-                success: true,
-                message: 'No lcagent/lcagents aliases found in shell configuration'
-            };
-        }
-        // Remove the aliases and comment
-        const lines = content.split('\n');
-        const filteredLines = lines.filter(line => !line.includes('alias lcagent=') &&
-            !line.includes('alias lcagents=') &&
-            !line.includes('# LCAgents alias') // Updated to match both old and new comments
-        );
-        await fs.writeFile(configFile, filteredLines.join('\n'));
-        return {
-            success: true,
-            message: `Aliases removed from ${shellName} configuration`,
-            instructions: 'Run "unalias lcagent lcagents" or restart terminal to remove from current session'
-        };
+        const isWin = process.platform === 'win32';
+        const instructions = isWin
+            ? 'Run "Remove-Item Alias:lcagent -ErrorAction SilentlyContinue; Remove-Item Alias:lcagents -ErrorAction SilentlyContinue" in PowerShell or restart your terminal'
+            : 'Run "unalias lcagent lcagents" or restart terminal to remove from current session';
+        return { success: true, message: `Aliases removed from ${modifiedFile}`, instructions };
     }
     catch (error) {
-        return {
-            success: false,
-            message: 'Failed to remove shell aliases - manually remove lcagent and lcagents aliases'
-        };
+        return { success: false, message: 'Failed to remove shell aliases - manually remove lcagent and lcagents aliases' };
     }
 }
 exports.uninstallCommand = new commander_1.Command('uninstall')
     .description('Remove LCAgents from the current directory')
     .option('-f, --force', 'Force removal without confirmation')
     .option('--keep-config', 'Keep configuration files')
-    .addHelpText('after', `
-Note: To avoid npx install prompts, use the standalone uninstaller:
-curl -fsSL https://raw.githubusercontent.com/jmaniLC/lcagents/main/uninstall.js | node -- --force
-  `)
+    .addHelpText('after', () => {
+    try {
+        const repoCfg = require('../../../config/repository.json');
+        const rawBase = process.env['REPOSITORY_RAWBASE'] || `https://raw.githubusercontent.com/${repoCfg.repository.owner}/${repoCfg.repository.name}`;
+        const defaultBranch = repoCfg.repository.defaultBranch || 'main';
+        const uninstallRaw = `${rawBase}/${defaultBranch}/uninstall.js`;
+        return `\nNote: To avoid npx install prompts, use the standalone uninstaller:\ncurl -fsSL ${uninstallRaw} | node -- --force\n  `;
+    }
+    catch (err) {
+        return `\nNote: To avoid npx install prompts, use the standalone uninstaller:\ncurl -fsSL https://raw.githubusercontent.com/jmaniLC/lcagents/main/uninstall.js | node -- --force\n  `;
+    }
+})
     .action(async (options) => {
     const currentDir = process.cwd();
     const lcagentsDir = path.join(currentDir, '.lcagents');
@@ -213,7 +211,14 @@ curl -fsSL https://raw.githubusercontent.com/jmaniLC/lcagents/main/uninstall.js 
             console.log(chalk_1.default.yellow(`   ⚠️  ${aliasResult.message}`));
         }
         console.log();
-        console.log(chalk_1.default.dim('To reinstall: npx git+https://github.com/jmaniLC/lcagents.git init'));
+        try {
+            const repoCfg = require('../../../config/repository.json');
+            const gitNpx = process.env['REPOSITORY_GITNPX'] || `git+${repoCfg.repository.url}`;
+            console.log(chalk_1.default.dim(`To reinstall: npx ${gitNpx} init`));
+        }
+        catch (err) {
+            console.log(chalk_1.default.dim('To reinstall: npx git+https://github.com/jmaniLC/lcagents.git init'));
+        }
         // Always provide manual unalias instructions
         if (aliasResult.success) {
             console.log();

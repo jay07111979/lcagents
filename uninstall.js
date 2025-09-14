@@ -235,7 +235,13 @@ async function main() {
     }
     
     console.log();
-    console.log(colorize('gray', 'To reinstall: npx git+https://github.com/jmaniLC/lcagents.git init'));
+    try {
+      const repoCfg = require('./config/repository.json');
+  const gitNpx = process.env.REPOSITORY_GITNPX || `git+${repoCfg.repository.url}`;
+      console.log(colorize('gray', `To reinstall: npx ${gitNpx} init`));
+    } catch (err) {
+      console.log(colorize('gray', 'To reinstall: npx git+https://github.com/jmaniLC/lcagents.git init'));
+    }
     
   } catch (error) {
     console.log();

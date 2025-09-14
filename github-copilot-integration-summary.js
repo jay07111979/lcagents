@@ -117,7 +117,14 @@ console.log('🎉 IMPLEMENTATION STATUS: ✅ COMPLETE');
 console.log('GitHub Copilot integration is now part of the LCAgents installation flow!\n');
 
 console.log('💻 NEXT STEPS FOR USERS:');
-console.log('   1. Run: npx git+https://github.com/jmaniLC/lcagents.git init');
+// Derive repository urls from config so this file stays in sync with project settings
+try {
+	const repoCfg = require('./config/repository.json');
+	const gitNpx = process.env['REPOSITORY_GITNPX'] || `git+${repoCfg.repository.url}`;
+	console.log(`   1. Run: npx ${gitNpx} init`);
+} catch (err) {
+	console.log('   1. Run: npx git+https://github.com/jmaniLC/lcagents.git init');
+}
 console.log('   2. Notice: .github/copilot-instructions.md automatically created/updated');
 console.log('   3. Enjoy: Enhanced GitHub Copilot experience with LCAgents context');
 console.log('   4. Uninstall: lcagents uninstall (cleans up GitHub Copilot config)');

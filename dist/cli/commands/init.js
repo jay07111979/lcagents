@@ -267,8 +267,17 @@ async function setupShellAlias() {
                 instructions: 'Manually add: alias lcagent="npx git+https://github.com/jmaniLC/lcagents.git"'
             };
         }
-        const aliasCommand1 = 'alias lcagent="npx git+https://github.com/jmaniLC/lcagents.git"';
-        const aliasCommand2 = 'alias lcagents="npx git+https://github.com/jmaniLC/lcagents.git"';
+        let aliasCommand1 = 'alias lcagent="npx git+https://github.com/jmaniLC/lcagents.git"';
+        let aliasCommand2 = 'alias lcagents="npx git+https://github.com/jmaniLC/lcagents.git"';
+        try {
+            const repoCfg = require('../../../config/repository.json');
+            const gitNpx = process.env['REPOSITORY_GITNPX'] || `git+${repoCfg.repository.url}`;
+            aliasCommand1 = `alias lcagent=\"npx ${gitNpx}\"`;
+            aliasCommand2 = `alias lcagents=\"npx ${gitNpx}\"`;
+        }
+        catch (err) {
+            // keep defaults
+        }
         const aliasComment = '# LCAgents aliases for easy access';
         // Check if alias already exists
         if (await fs.pathExists(configFile)) {
@@ -290,8 +299,8 @@ async function setupShellAlias() {
             const activateScript = `#!/bin/bash
 # LCAgents alias activation script
 source ${configFile}
-alias lcagent="npx git+https://github.com/jmaniLC/lcagents.git"
-alias lcagents="npx git+https://github.com/jmaniLC/lcagents.git"
+${aliasCommand1}
+${aliasCommand2}
 echo "✅ LCAgents aliases activated in current session"
 # Clean up this temporary script
 rm -f "${tempScript}"

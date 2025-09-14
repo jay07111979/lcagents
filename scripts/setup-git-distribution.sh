@@ -118,10 +118,37 @@ For LendingClub Engineering Teams Only"
 echo "✅ Git repository setup complete!"
 echo ""
 echo "🔗 Next steps for distribution:"
-echo "1. Create repository at: https://github.com/jmaniLC/lcagents"
-echo "2. Add remote: git remote add origin https://github.com/jmaniLC/lcagents.git"
+
+# Derive repository URLs with environment overrides, then fall back to config/repository.json, then to hardcoded defaults
+REPO_GITURL=${REPOSITORY_GITURL:-}
+REPO_GITNPX=${REPOSITORY_GITNPX:-}
+REPO_RAWBASE=${REPOSITORY_RAWBASE:-}
+
+if [ -z "$REPO_GITURL" ] || [ -z "$REPO_GITNPX" ] || [ -z "$REPO_RAWBASE" ]; then
+    if [ -f "./config/repository.json" ]; then
+        # Use node to safely parse JSON and print fields
+        PARSED_GITURL=$(node -e "console.log(require('./config/repository.json').repository.url)")
+        PARSED_OWNER=$(node -e "console.log(require('./config/repository.json').repository.owner)")
+        PARSED_NAME=$(node -e "console.log(require('./config/repository.json').repository.name)")
+        PARSED_DEFAULT_BRANCH=$(node -e "console.log(require('./config/repository.json').repository.defaultBranch||'main')")
+
+        REPO_GITURL=${REPO_GITURL:-$PARSED_GITURL}
+        REPO_GITNPX=${REPO_GITNPX:-git+${REPO_GITURL}}
+        REPO_RAWBASE=${REPO_RAWBASE:-https://raw.githubusercontent.com/${PARSED_OWNER}/${PARSED_NAME}}
+        REPO_DEFAULT_BRANCH=${REPO_DEFAULT_BRANCH:-$PARSED_DEFAULT_BRANCH}
+    else
+        # Hardcoded fallback
+        REPO_GITURL=${REPO_GITURL:-https://github.com/jmaniLC/lcagents.git}
+        REPO_GITNPX=${REPO_GITNPX:-git+https://github.com/jmaniLC/lcagents.git}
+        REPO_RAWBASE=${REPO_RAWBASE:-https://raw.githubusercontent.com/jmaniLC/lcagents}
+        REPO_DEFAULT_BRANCH=${REPO_DEFAULT_BRANCH:-main}
+    fi
+fi
+
+echo "1. Create repository at: ${REPO_GITURL%.*}"
+echo "2. Add remote: git remote add origin ${REPO_GITURL}"
 echo "3. Push code: git push -u origin main"
 echo "4. Push tags: git push origin --tags"
 echo ""
 echo "🚀 Then teams can install with:"
-echo "   npx git+https://github.com/jmaniLC/lcagents.git init"
+echo "   npx ${REPO_GITNPX} init"

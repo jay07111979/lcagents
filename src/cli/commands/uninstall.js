@@ -5,7 +5,7 @@
  * Version: 2.2.0
  * 
  * Downloads and runs this script independently to avoid npx install prompts
- * Usage: curl -fsSL https://raw.githubusercontent.com/jmaniLC/lcagents/main/uninstall.js | node
+ * Usage: curl -fsSL <raw-url-from-config> | node
  */
 
 const fs = require('fs');
@@ -132,6 +132,7 @@ async function removeShellAlias() {
 
 async function main() {
   console.log(colorize('cyan', '🔧 LCAgents Uninstaller'));
+  // keep version string as-is, but derive uninstall raw URL and reinstall npx url later
   console.log(colorize('gray', 'github:jmaniLC/lcagents ver2.2'));
   console.log();
 
@@ -195,7 +196,16 @@ async function main() {
     console.log();
     console.log(colorize('green', '✅ LCAgents completely removed'));
     console.log();
-    console.log(colorize('gray', 'To reinstall: npx git+https://github.com/jmaniLC/lcagents.git init'));
+      try {
+        const repoCfg = require('../../../../config/repository.json');
+  const rawBase = process.env.REPOSITORY_RAWBASE || `https://raw.githubusercontent.com/${repoCfg.repository.owner}/${repoCfg.repository.name}`;
+        const defaultBranch = repoCfg.repository.defaultBranch || 'main';
+        const uninstallRaw = `${rawBase}/${defaultBranch}/uninstall.js`;
+  const gitNpx = process.env.REPOSITORY_GITNPX || `git+${repoCfg.repository.url}`;
+        console.log(colorize('gray', `To reinstall: npx ${gitNpx} init`));
+      } catch (err) {
+        console.log(colorize('gray', 'To reinstall: npx git+https://github.com/jmaniLC/lcagents.git init'));
+      }
     
   } catch (error) {
     console.log();

@@ -63,7 +63,6 @@ export async function selectInstallationDirectory(): Promise<string> {
   console.log(chalk.gray(`\n📍 Selected installation path: ${installPath}`));
   return installPath;
 }
-
 /**
  * Validate directory for LCAgents installation
  */
@@ -234,7 +233,16 @@ async function setupShellAlias(): Promise<{ success: boolean; message: string; i
     let configFile = '';
     let shellName = '';
     
-    if (shell.includes('zsh')) {
+    const isWin = process.platform === 'win32';
+
+    if (isWin) {
+      // On Windows, we'll target PowerShell profile locations
+      // Prefer modern PowerShell profile location under Documents\PowerShell, fallback to WindowsPowerShell
+      const p1 = path.join(homeDir, 'Documents', 'PowerShell', 'Microsoft.PowerShell_profile.ps1');
+      const p2 = path.join(homeDir, 'Documents', 'WindowsPowerShell', 'Microsoft.PowerShell_profile.ps1');
+      configFile = (await fs.pathExists(p1)) ? p1 : p2;
+      shellName = 'powershell';
+    } else if (shell.includes('zsh')) {
       configFile = path.join(homeDir, '.zshrc');
       shellName = 'zsh';
     } else if (shell.includes('bash')) {
@@ -249,15 +257,30 @@ async function setupShellAlias(): Promise<{ success: boolean; message: string; i
       }
       shellName = 'bash';
     } else {
-      return {
-        success: false,
-        message: 'Unsupported shell detected',
-        instructions: 'Manually add: alias lcagent="npx git+https://github.com/jmaniLC/lcagents.git"'
-      };
+      // Unknown shell - fall back to POSIX-style rc file in home
+      configFile = path.join(homeDir, '.profile');
+      shellName = 'sh';
     }
 
-    const aliasCommand1 = 'alias lcagent="npx git+https://github.com/jmaniLC/lcagents.git"';
-    const aliasCommand2 = 'alias lcagents="npx git+https://github.com/jmaniLC/lcagents.git"';
+    let aliasCommand1 = 'alias lcagent="npx git+https://github.com/jmaniLC/lcagents.git"';
+    let aliasCommand2 = 'alias lcagents="npx git+https://github.com/jmaniLC/lcagents.git"';
+    try {
+      const repoCfg = require('../../../config/repository.json');
+  const gitNpx = process.env['REPOSITORY_GITNPX'] || `git+${repoCfg.repository.url}`;
+      aliasCommand1 = `alias lcagent=\"npx ${gitNpx}\"`;
+      aliasCommand2 = `alias lcagents=\"npx ${gitNpx}\"`;
+    } catch (err) {
+      // keep defaults
+    }
+    // Safely derive git target argument for npx commands
+    let gitTarget: string | undefined;
+    try {
+      const repoCfg2 = require('../../../config/repository.json');
+      gitTarget = process.env['REPOSITORY_GITNPX'] || `git+${repoCfg2.repository.url}`;
+    } catch (err) {
+      gitTarget = process.env['REPOSITORY_GITNPX'];
+    }
+    if (!gitTarget) gitTarget = 'git+https://github.com/jmaniLC/lcagents.git';
     const aliasComment = '# LCAgents aliases for easy access';
     
     // Check if alias already exists
@@ -271,44 +294,68 @@ async function setupShellAlias(): Promise<{ success: boolean; message: string; i
       }
     }
     
-    // Add aliases to shell config
-    const aliasEntry = `\n${aliasComment}\n${aliasCommand1}\n${aliasCommand2}\n`;
-    await fs.ensureFile(configFile);
-    await fs.appendFile(configFile, aliasEntry);
-    
-    // Create activation script for immediate alias availability
-    try {
-      const tempScript = path.join(os.tmpdir(), 'lcagents-activate.sh');
-      const activateScript = `#!/bin/bash
-# LCAgents alias activation script
-source ${configFile}
-alias lcagent="npx git+https://github.com/jmaniLC/lcagents.git"
-alias lcagents="npx git+https://github.com/jmaniLC/lcagents.git"
-echo "✅ LCAgents aliases activated in current session"
-# Clean up this temporary script
-rm -f "${tempScript}"
-`;
-      
-      await fs.writeFile(tempScript, activateScript, { mode: 0o755 });
-      
-      // Show clear activation instructions with immediate execution option
-      console.log(chalk.green('✅ LCAgents aliases configured in shell!'));
-      console.log(chalk.yellow('💡 To activate immediately in this terminal:'));
-      console.log(chalk.cyan(`   source ${tempScript}`));
-      console.log(chalk.dim('   (or restart your terminal for automatic activation)'));
-      console.log();
-      
-      return {
-        success: true,
-        message: `Aliases added to ${shellName} configuration`,
-        instructions: `Execute: source ${tempScript} for immediate activation`
-      };
-    } catch (error) {
-      return {
-        success: true,
-        message: `Aliases added to ${shellName} configuration`,
-        instructions: `Run 'source ${path.basename(configFile)}' or restart your terminal to use 'lcagent' and 'lcagents' commands`
-      };
+    // Add aliases to shell config (different per-shell)
+    if (isWin) {
+      // For PowerShell, create functions instead of POSIX alias
+      const psFunc1 = `function lcagent { param([Parameter(ValueFromRemainingArguments=$true)]$args) npx ${gitTarget} $args }`;
+      const psFunc2 = `function lcagents { param([Parameter(ValueFromRemainingArguments=$true)]$args) npx ${gitTarget} $args }`;
+      const entry = `# LCAgents aliases\n${psFunc1}\n${psFunc2}\n`;
+      await fs.ensureFile(configFile);
+      await fs.appendFile(configFile, entry, 'utf-8');
+
+      // Create activation script for PowerShell
+      try {
+        const tempScript = path.join(os.tmpdir(), 'lcagents-activate.ps1');
+        const activateScript = `# LCAgents alias activation script\n. '${configFile.replace(/\\/g, '\\')}'\nWrite-Host '✅ LCAgents aliases activated in current session'\nRemove-Item -Path '${tempScript}' -ErrorAction SilentlyContinue\n`;
+        await fs.writeFile(tempScript, activateScript, { mode: 0o644 });
+
+        console.log(chalk.green('✅ LCAgents aliases configured in PowerShell profile!'));
+        console.log(chalk.yellow('💡 To activate immediately in this PowerShell session:'));
+        console.log(chalk.cyan(`   & '${tempScript}'`));
+        console.log(chalk.dim('   (or restart your PowerShell session for automatic activation)'));
+        console.log();
+
+        return {
+          success: true,
+          message: `Aliases added to ${shellName} configuration`,
+          instructions: `Execute: & '${tempScript}' for immediate activation`
+        };
+      } catch (error) {
+        return {
+          success: true,
+          message: `Aliases added to ${shellName} configuration`,
+          instructions: `Restart your PowerShell session or run: . ${configFile}`
+        };
+      }
+    } else {
+      const aliasEntry = `\n${aliasComment}\n${aliasCommand1}\n${aliasCommand2}\n`;
+      await fs.ensureFile(configFile);
+      await fs.appendFile(configFile, aliasEntry);
+
+      // Create activation script for immediate alias availability (POSIX)
+      try {
+        const tempScript = path.join(os.tmpdir(), 'lcagents-activate.sh');
+        const activateScript = `#!/bin/bash\n# LCAgents alias activation script\nsource ${configFile}\n${aliasCommand1}\n${aliasCommand2}\necho "✅ LCAgents aliases activated in current session"\n# Clean up this temporary script\nrm -f \"${tempScript}\"\n`;
+        await fs.writeFile(tempScript, activateScript, { mode: 0o755 });
+
+        console.log(chalk.green('✅ LCAgents aliases configured in shell!'));
+        console.log(chalk.yellow('💡 To activate immediately in this terminal:'));
+        console.log(chalk.cyan(`   source ${tempScript}`));
+        console.log(chalk.dim('   (or restart your terminal for automatic activation)'));
+        console.log();
+
+        return {
+          success: true,
+          message: `Aliases added to ${shellName} configuration`,
+          instructions: `Execute: source ${tempScript} for immediate activation`
+        };
+      } catch (error) {
+        return {
+          success: true,
+          message: `Aliases added to ${shellName} configuration`,
+          instructions: `Run 'source ${path.basename(configFile)}' or restart your terminal to use 'lcagent' and 'lcagents' commands`
+        };
+      }
     }
     
   } catch (error) {
