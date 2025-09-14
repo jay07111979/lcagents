@@ -288,6 +288,49 @@ describe('Installation Flow', () => {
     });
   });
 
+  describe('Shim Creation', () => {
+    it('should create a user shim when invoked and return instructions', async () => {
+      // Ensure test directory has a dist cli to point at
+      const distCli = path.join(testDir, 'dist', 'cli');
+      await fs.ensureDir(distCli);
+      await fs.writeFile(path.join(distCli, 'index.js'), 'console.log("cli");');
+
+      // Mock home directory to our testDir to avoid touching real user files
+      const originalHome = process.env['HOME'] || process.env['USERPROFILE'];
+      try {
+        if (process.platform === 'win32') {
+          process.env['USERPROFILE'] = testDir;
+        } else {
+          process.env['HOME'] = testDir;
+        }
+
+        const { createUserShim } = await import('../../cli/commands/init');
+        const result = await createUserShim(testDir);
+
+        expect(result).toBeDefined();
+        expect(result.success).toBe(true);
+        expect(result.message).toMatch(/User shim created/);
+        expect(result.instructions).toBeTruthy();
+
+        // Verify shim file exists on disk
+        if (process.platform === 'win32') {
+          const shimPath = path.join(process.env['USERPROFILE'] || testDir, 'bin', 'lcagent.ps1');
+          expect(await fs.pathExists(shimPath)).toBe(true);
+        } else {
+          const shimPath = path.join(process.env['HOME'] || testDir, '.local', 'bin', 'lcagent');
+          expect(await fs.pathExists(shimPath)).toBe(true);
+        }
+      } finally {
+        // restore home env
+        if (process.platform === 'win32') {
+          process.env['USERPROFILE'] = originalHome;
+        } else {
+          process.env['HOME'] = originalHome;
+        }
+      }
+    });
+  });
+
   describe('Integration: Complete Flow Validation', () => {
     it('should validate the new 8-step installation flow order', () => {
       // This test validates that we have restructured the flow correctly

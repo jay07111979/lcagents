@@ -303,59 +303,31 @@ async function setupShellAlias(): Promise<{ success: boolean; message: string; i
       await fs.ensureFile(configFile);
       await fs.appendFile(configFile, entry, 'utf-8');
 
-      // Create activation script for PowerShell
-      try {
-        const tempScript = path.join(os.tmpdir(), 'lcagents-activate.ps1');
-        const activateScript = `# LCAgents alias activation script\n. '${configFile.replace(/\\/g, '\\')}'\nWrite-Host '✅ LCAgents aliases activated in current session'\nRemove-Item -Path '${tempScript}' -ErrorAction SilentlyContinue\n`;
-        await fs.writeFile(tempScript, activateScript, { mode: 0o644 });
+      // For PowerShell provide an activation instruction (do not create temp files)
+      console.log(chalk.green('✅ LCAgents aliases configured in PowerShell profile!'));
+      console.log(chalk.dim('   (restart your PowerShell session to load the new functions)'));
+      console.log();
 
-        console.log(chalk.green('✅ LCAgents aliases configured in PowerShell profile!'));
-        console.log(chalk.yellow('💡 To activate immediately in this PowerShell session:'));
-        console.log(chalk.cyan(`   & '${tempScript}'`));
-        console.log(chalk.dim('   (or restart your PowerShell session for automatic activation)'));
-        console.log();
-
-        return {
-          success: true,
-          message: `Aliases added to ${shellName} configuration`,
-          instructions: `Execute: & '${tempScript}' for immediate activation`
-        };
-      } catch (error) {
-        return {
-          success: true,
-          message: `Aliases added to ${shellName} configuration`,
-          instructions: `Restart your PowerShell session or run: . ${configFile}`
-        };
-      }
+      return {
+        success: true,
+        message: `Aliases added to ${shellName} configuration`,
+        instructions: `Run in current PowerShell session: . '${configFile}'`
+      };
     } else {
       const aliasEntry = `\n${aliasComment}\n${aliasCommand1}\n${aliasCommand2}\n`;
       await fs.ensureFile(configFile);
       await fs.appendFile(configFile, aliasEntry);
 
-      // Create activation script for immediate alias availability (POSIX)
-      try {
-        const tempScript = path.join(os.tmpdir(), 'lcagents-activate.sh');
-        const activateScript = `#!/bin/bash\n# LCAgents alias activation script\nsource ${configFile}\n${aliasCommand1}\n${aliasCommand2}\necho "✅ LCAgents aliases activated in current session"\n# Clean up this temporary script\nrm -f \"${tempScript}\"\n`;
-        await fs.writeFile(tempScript, activateScript, { mode: 0o755 });
+      // For POSIX shells return a direct source command (no temp script)
+      console.log(chalk.green('✅ LCAgents aliases configured in shell!'));
+      console.log(chalk.dim('   (restart your terminal to load the new aliases)'));
+      console.log();
 
-        console.log(chalk.green('✅ LCAgents aliases configured in shell!'));
-        console.log(chalk.yellow('💡 To activate immediately in this terminal:'));
-        console.log(chalk.cyan(`   source ${tempScript}`));
-        console.log(chalk.dim('   (or restart your terminal for automatic activation)'));
-        console.log();
-
-        return {
-          success: true,
-          message: `Aliases added to ${shellName} configuration`,
-          instructions: `Execute: source ${tempScript} for immediate activation`
-        };
-      } catch (error) {
-        return {
-          success: true,
-          message: `Aliases added to ${shellName} configuration`,
-          instructions: `Run 'source ${path.basename(configFile)}' or restart your terminal to use 'lcagent' and 'lcagents' commands`
-        };
-      }
+      return {
+        success: true,
+        message: `Aliases added to ${shellName} configuration`,
+        instructions: `Run in current shell: source ${configFile}`
+      };
     }
     
   } catch (error) {
@@ -363,6 +335,51 @@ async function setupShellAlias(): Promise<{ success: boolean; message: string; i
       success: false,
       message: 'Failed to setup shell alias',
       instructions: 'Manually add: alias lcagent="npx git+https://github.com/jmaniLC/lcagents.git"'
+    };
+  }
+}
+
+/**
+ * Create a per-user shim that invokes the project's local CLI.
+ * Returns an activation instruction string the user can run to make the shim available in the current session.
+ */
+export async function createUserShim(installPath: string): Promise<{ success: boolean; message: string; instructions?: string }> {
+  try {
+    const isWin = process.platform === 'win32';
+    const home = os.homedir();
+
+    if (isWin) {
+      const userBin = path.join(process.env['USERPROFILE'] || home, 'bin');
+      await fs.ensureDir(userBin);
+      const shimPath = path.join(userBin, 'lcagent.ps1');
+      const projectCli = path.join(installPath, 'dist', 'cli', 'index.js');
+      const body = `param([Parameter(ValueFromRemainingArguments=$true)] $args)\nnode '${projectCli}' $args\n`;
+      await fs.writeFile(shimPath, body, 'utf8');
+
+      return {
+        success: true,
+        message: `User shim created at ${shimPath}`,
+        instructions: `Add ${userBin} to your PATH or run: $env:PATH += ';${userBin}'; . ${shimPath}`
+      };
+    } else {
+      const userBin = path.join(home, '.local', 'bin');
+      await fs.ensureDir(userBin);
+      const shimPath = path.join(userBin, 'lcagent');
+      const projectCli = path.join(installPath, 'dist', 'cli', 'index.js');
+      const shim = `#!/usr/bin/env bash\nnode "${projectCli}" "$@"\n`;
+      await fs.writeFile(shimPath, shim, { mode: 0o755 });
+
+      return {
+        success: true,
+        message: `User shim created at ${shimPath}`,
+        instructions: `Ensure ${userBin} is on your PATH (e.g. export PATH=\"${userBin}:$PATH\") or run: source ~/.profile`
+      };
+    }
+  } catch (error) {
+    return {
+      success: false,
+      message: 'Failed to create user shim',
+      instructions: 'You can add an alias pointing to dist/cli/index.js or use npm link'
     };
   }
 }
@@ -558,17 +575,39 @@ export const initCommand = new Command('init')
       
       // Setup shell alias
       const aliasResult = await setupShellAlias();
+      // Try to create a local user shim that points to the installed CLI for better local UX
+      let shimResult: { success: boolean; message: string; instructions?: string } | null = null;
+      try {
+        shimResult = await createUserShim(installPath);
+      } catch (err) {
+        shimResult = null;
+      }
       if (aliasResult.success) {
         console.log(chalk.green('🔧 Shell Alias Setup:'));
         console.log(chalk.white(`   ✅ ${aliasResult.message}`));
-        if (aliasResult.instructions) {
-          // Check if it's the activation script instruction
-          if (aliasResult.instructions.includes('/tmp/lcagents-activate.sh')) {
-            console.log(chalk.yellow('   🚀 Quick Start:'));
-            console.log(chalk.cyan(`   ${aliasResult.instructions.split(': ')[1]}`));
+  if (aliasResult.instructions) {
+          // Show platform-specific activation instruction clearly
+          if (process.platform === 'win32') {
+            console.log(chalk.yellow('   🚀 To activate aliases in the current PowerShell session:'));
+            console.log(chalk.cyan(`   ${aliasResult.instructions}`));
+            console.log(chalk.dim('   (or restart PowerShell to load the new profile automatically)'));
           } else {
-            console.log(chalk.dim(`   💡 ${aliasResult.instructions}`));
+            console.log(chalk.yellow('   🚀 To activate aliases in the current shell:'));
+            console.log(chalk.cyan(`   ${aliasResult.instructions}`));
+            console.log(chalk.dim('   (or restart your terminal to load the updated shell configuration)'));
           }
+          // Provide a quick verification command the user can run now
+          console.log(chalk.yellow('   🔎 Verify the commands are available now:'));
+          console.log(chalk.cyan(`   ${process.platform === 'win32' ? 'lcagent -h' : 'lcagent -h'}`));
+          console.log(chalk.dim('   If the command is not found, run the activation command above or restart your terminal/PowerShell.'));
+        }
+        // If shim was created, show its instructions as the preferred way to run the local CLI
+        if (shimResult && shimResult.success) {
+          console.log(chalk.yellow('   📦 Local shim installed:'));
+          console.log(chalk.cyan(`   ${shimResult.instructions}`));
+          console.log(chalk.dim('   After adding the user bin to PATH you can run: lcagent -h'));
+        } else if (shimResult && !shimResult.success) {
+          console.log(chalk.dim(`   (shim creation skipped: ${shimResult.message})`));
         }
         console.log(chalk.white('   Available commands:'), chalk.cyan('lcagent <command>'), chalk.dim('or'), chalk.cyan('lcagents <command>'));
         console.log();
